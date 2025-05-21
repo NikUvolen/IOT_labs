@@ -1,0 +1,28 @@
+#define trigPin D2
+#define echoPin D3
+
+void setup() {
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  digitalWrite(trigPin, LOW);
+  Serial.begin(115200);
+}
+
+void loop() {
+  long distance = getDistance();
+  Serial.println(distance);
+  delay(100);
+}
+
+long getDistance() {
+  long distanceCM = getEchoTiming() * 1.7 * 0.01;
+  return distanceCM;
+}
+
+long getEchoTiming() {
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH);
+  return duration;
+}

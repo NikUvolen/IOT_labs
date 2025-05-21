@@ -1,0 +1,166 @@
+#include <Stepper.h>
+#include "myMQQT.h"
+
+bool ledOn = false;
+int ledBrig = 50;
+
+
+const int stepsPerRevolution = 2048;  // change this to fit the number of steps per revolution
+
+// ULN2003 Motor Driver Pins
+#define IN1 D5
+#define IN2 D3
+#define IN3 D2
+#define IN4 D1
+#define BTN_PIN D7
+
+GStepper<STEPPER4WIRE> stepper(2048, IN1, IN3, IN2, IN4);
+
+bool motorOn = false;
+int motorSpeed = 700;
+bool directionIsLeft = false;
+
+int currentCoord = 0;
+int closeCoords;
+
+
+unsigned long lastPressBTN = 0;
+
+void callback(char* topic, byte* payload, unsigned int length) {
+    
+  String data_pay;
+  for (int i = 0; i < length; i++) {
+    data_pay += String((char)payload[i]);
+  }
+    
+  if (String(topic) == (motor_topic + "/on")){
+    Serial.printf("On/Off: %s\n", data_pay);
+    motorOn = (data_pay == "ON" || data_pay == "1") ? true : false;
+  }
+  if (String(topic) == (motor_topic + "/speed")){
+    Serial.printf("speed: %s\n", data_pay);
+    motorSpeed = data_pay.toInt();
+  }
+  if (String(topic) == (motor_topic + "/direction")) {
+    Serial.printf("Direction: %s\n", data_pay);
+    if (data_pay == "1") {
+      goTo(0.0);
+    }
+    else if (data_pay == "2") {
+      goTo(0.25);
+    }
+    else if ((data_pay == "3")) {
+      goTo(0.5);
+    }
+    else if ((data_pay == "4")) {
+      goTo(0.75);
+    }
+    else {
+      goTo(1.0);
+    }
+  }
+  if (String(topic) == (motor_topic + "/procOpenSlider")) {
+    Serial.printf("Proc open: %s\n", data_pay);
+    float procOpen = data_pay.toInt() / 100;
+    goTo(procOpen);
+  }
+  // if (String(topic) == (motor_topic + "/setCoords")) {
+  //   // TODO: выбивает esp при команде
+  //   Serial.printf("set coords: %s\n", data_pay);
+  //   delay(20);
+  //   setOpenPos();
+  //   delay(20);
+  //   closeCoords = getCloseCoords();
+  //   currentCoord = closeCoords;
+  //   client.publish("/home/curtains/procOpen", String(currentCoord).c_str(), false);
+  // }
+}
+
+int motorStep(bool isClose, int step = 15) {
+  step = isClose ? step : -step;
+  int sleep = 301;
+  if (motorSpeed)
+    sleep -= (20 * motorSpeed);
+  myStepper.step(step);
+  int procOpen = (closeCoords / currentCoord) * 100;
+  client.publish("/home/curtains/procOpen", String(procOpen).c_str(), false);
+  return step;
+}
+
+bool getBtnPress() {
+  if ((digitalRead(BTN_PIN) == HIGH) && (millis() - lastPressBTN > 1000)) {
+    lastPressBTN = millis();
+    return true;
+  }  
+  return false;
+}
+
+void goTo(float proc) {
+  int goToCoord = floor(closeCoords * proc);
+  int step, x;
+  int distance = goToCoord - currentCoord;
+  for (int i=300; i >= 1; i--) {
+    if (distance % i == 0) {
+      step = i;
+      break;
+    }
+  }  
+  x = abs(distance / step);
+
+  Serial.printf("Go to: %d, %d, %d, %d\n", goToCoord, distance, step, x);
+
+  for (int i = 0; i < x; i++) {
+    if (currentCoord > goToCoord)
+      currentCoord += motorStep(false, step);
+    else if (currentCoord < goToCoord)
+      currentCoord += motorStep(true, step);
+  }
+}
+
+void setOpenPos() {
+  while (!getBtnPress()) {
+    motorStep(false);
+  }
+  currentCoord = 0;
+}
+
+int getCloseCoords() {
+  int coords = 0;
+  while (!getBtnPress()) {
+    coords += motorStep(true);
+  }
+  return coords;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(BTN_PIN, INPUT); 
+
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback); 
+
+  WiFi.mode(WIFI_STA);
+
+  wifiConnect();
+  if (!client.connected()) {
+    reconnect();
+  }
+
+  myStepper.setSpeed(400);
+  setOpenPos();
+  closeCoords = getCloseCoords();
+  currentCoord = closeCoords;
+  client.publish("/home/curtains/procOpen", String(currentCoord).c_str(), false);
+}
+
+void loop() {
+  wifiConnect();
+  if (!client.connected()) {
+    reconnect();
+  }
+
+  myStepper.tick();
+
+  client.loop(); 
+}
