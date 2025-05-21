@@ -1,13 +1,7 @@
-#include <Stepper.h>
+#include <GyverStepper.h>
 #include "myMQQT.h"
 
-bool ledOn = false;
-int ledBrig = 50;
-
-
-const int stepsPerRevolution = 2048;  // change this to fit the number of steps per revolution
-
-// ULN2003 Motor Driver Pins
+const int stepsPerRevolution = 2048;
 #define IN1 D5
 #define IN2 D3
 #define IN3 D2
@@ -16,75 +10,26 @@ const int stepsPerRevolution = 2048;  // change this to fit the number of steps 
 
 GStepper<STEPPER4WIRE> stepper(2048, IN1, IN3, IN2, IN4);
 
+// Состояния системы
+enum SystemState {
+  STATE_NORMAL,
+  STATE_SET_OPEN_POS,
+  STATE_SET_CLOSE_COORDS
+};
+
+SystemState currentState = STATE_NORMAL;
 bool motorOn = false;
 int motorSpeed = 700;
-bool directionIsLeft = false;
-
-int currentCoord = 0;
-int closeCoords;
-
-
+long closeCoords = 0;
+long currentPos, lastSend;
 unsigned long lastPressBTN = 0;
+unsigned long calibrationStartTime = 0;
 
-void callback(char* topic, byte* payload, unsigned int length) {
-    
-  String data_pay;
-  for (int i = 0; i < length; i++) {
-    data_pay += String((char)payload[i]);
+void wifiConfig() {
+  wifiConnect();
+  if (!client.connected()) {
+    reconnect();
   }
-    
-  if (String(topic) == (motor_topic + "/on")){
-    Serial.printf("On/Off: %s\n", data_pay);
-    motorOn = (data_pay == "ON" || data_pay == "1") ? true : false;
-  }
-  if (String(topic) == (motor_topic + "/speed")){
-    Serial.printf("speed: %s\n", data_pay);
-    motorSpeed = data_pay.toInt();
-  }
-  if (String(topic) == (motor_topic + "/direction")) {
-    Serial.printf("Direction: %s\n", data_pay);
-    if (data_pay == "1") {
-      goTo(0.0);
-    }
-    else if (data_pay == "2") {
-      goTo(0.25);
-    }
-    else if ((data_pay == "3")) {
-      goTo(0.5);
-    }
-    else if ((data_pay == "4")) {
-      goTo(0.75);
-    }
-    else {
-      goTo(1.0);
-    }
-  }
-  if (String(topic) == (motor_topic + "/procOpenSlider")) {
-    Serial.printf("Proc open: %s\n", data_pay);
-    float procOpen = data_pay.toInt() / 100;
-    goTo(procOpen);
-  }
-  // if (String(topic) == (motor_topic + "/setCoords")) {
-  //   // TODO: выбивает esp при команде
-  //   Serial.printf("set coords: %s\n", data_pay);
-  //   delay(20);
-  //   setOpenPos();
-  //   delay(20);
-  //   closeCoords = getCloseCoords();
-  //   currentCoord = closeCoords;
-  //   client.publish("/home/curtains/procOpen", String(currentCoord).c_str(), false);
-  // }
-}
-
-int motorStep(bool isClose, int step = 15) {
-  step = isClose ? step : -step;
-  int sleep = 301;
-  if (motorSpeed)
-    sleep -= (20 * motorSpeed);
-  myStepper.step(step);
-  int procOpen = (closeCoords / currentCoord) * 100;
-  client.publish("/home/curtains/procOpen", String(procOpen).c_str(), false);
-  return step;
 }
 
 bool getBtnPress() {
@@ -95,72 +40,144 @@ bool getBtnPress() {
   return false;
 }
 
+void changeMotorSpeed(int speed) {
+  motorSpeed = speed;
+  stepper.setSpeed(motorSpeed);  // Установка текущей скорости
+  stepper.setMaxSpeed(motorSpeed); // Установка максимальной скорости
+}
+
 void goTo(float proc) {
-  int goToCoord = floor(closeCoords * proc);
-  int step, x;
-  int distance = goToCoord - currentCoord;
-  for (int i=300; i >= 1; i--) {
-    if (distance % i == 0) {
-      step = i;
-      break;
-    }
-  }  
-  x = abs(distance / step);
+  if (closeCoords == 0) return;
+  long goToCoord = floor(closeCoords * proc);
+  stepper.setTarget(goToCoord);
+}
 
-  Serial.printf("Go to: %d, %d, %d, %d\n", goToCoord, distance, step, x);
+void startSetOpenPos() {
+  currentState = STATE_SET_OPEN_POS;
 
-  for (int i = 0; i < x; i++) {
-    if (currentCoord > goToCoord)
-      currentCoord += motorStep(false, step);
-    else if (currentCoord < goToCoord)
-      currentCoord += motorStep(true, step);
+  stepper.setRunMode(KEEP_SPEED);
+  stepper.setSpeed(-motorSpeed);
+  calibrationStartTime = millis();
+  Serial.println("Start setting open position");
+}
+
+void processSetOpenPos() {
+  if (getBtnPress()) {
+    stepper.reset();
+    Serial.println("Open position set");
+    startSetCloseCoords();
+  }
+  
+  // freeze defend (60 sec timeout)
+  if (millis() - calibrationStartTime > 60000) {
+    currentState = STATE_NORMAL;
+    stepper.brake();
+    Serial.println("Open position timeout");
   }
 }
 
-void setOpenPos() {
-  while (!getBtnPress()) {
-    motorStep(false);
-  }
-  currentCoord = 0;
+void startSetCloseCoords() {
+  currentState = STATE_SET_CLOSE_COORDS;
+
+  stepper.setRunMode(KEEP_SPEED);
+  stepper.setSpeed(motorSpeed);
+  calibrationStartTime = millis();
+  Serial.println("Start setting close position");
 }
 
-int getCloseCoords() {
-  int coords = 0;
-  while (!getBtnPress()) {
-    coords += motorStep(true);
+void processSetCloseCoords() {
+  if (getBtnPress()) {
+    stepper.brake();
+    closeCoords = stepper.getCurrent();
+    stepper.setRunMode(FOLLOW_POS);
+    currentState = STATE_NORMAL;
+    Serial.printf("Close position set: %d\n", closeCoords);
   }
-  return coords;
+
+  // freeze defend (60 sec timeout)
+  if (millis() - calibrationStartTime > 60000) {
+    currentState = STATE_NORMAL;
+    stepper.brake();
+    Serial.println("Close position timeout");
+  }
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  String data_pay;
+  for (int i = 0; i < length; i++) {
+    data_pay += String((char)payload[i]);
+  }
+    
+  if (String(topic) == (motor_topic + "/on")) {
+    motorOn = (data_pay == "ON" || data_pay == "1") ? true : false;
+    Serial.printf("On/Off: %s\n", data_pay);
+  }
+  else if (String(topic) == (motor_topic + "/speed")) {
+    Serial.printf("speed: %s\n", data_pay);
+    changeMotorSpeed(data_pay.toInt());
+  }
+  else if (String(topic) == (motor_topic + "/direction")) {
+    Serial.printf("Direction: %s\n", data_pay);
+    if (data_pay == "1") goTo(0.0);
+    else if (data_pay == "2") goTo(0.25);
+    else if (data_pay == "3") goTo(0.5);
+    else if (data_pay == "4") goTo(0.75);
+    else goTo(1.0);
+  }
+  else if (String(topic) == (motor_topic + "/procOpenSlider")) {
+    Serial.printf("Direction: %s\n", data_pay);
+    float newPos = data_pay.toFloat() / 100;
+    Serial.println(newPos);
+    goTo(newPos);
+  }
+  else if (String(topic) == (motor_topic + "/сolibration")) {
+    startSetOpenPos();
+  }
 }
 
 void setup() {
   Serial.begin(115200);
-
   pinMode(BTN_PIN, INPUT); 
 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback); 
 
   WiFi.mode(WIFI_STA);
+  wifiConfig();
 
-  wifiConnect();
-  if (!client.connected()) {
-    reconnect();
-  }
+  lastSend = millis();
 
-  myStepper.setSpeed(400);
-  setOpenPos();
-  closeCoords = getCloseCoords();
-  currentCoord = closeCoords;
-  client.publish("/home/curtains/procOpen", String(currentCoord).c_str(), false);
+  stepper.setRunMode(FOLLOW_POS);
+  stepper.setMaxSpeed(motorSpeed);
+  stepper.setAcceleration(600);
+  
+  // Первоначальная калибровка
+  startSetOpenPos();
 }
 
 void loop() {
   wifiConnect();
-  if (!client.connected()) {
-    reconnect();
+  client.loop();
+  
+  stepper.tick();
+
+  switch (currentState) {
+    case STATE_SET_OPEN_POS:
+      processSetOpenPos();
+      break;
+    case STATE_SET_CLOSE_COORDS:
+      processSetCloseCoords();
+      break;
+    case STATE_NORMAL:
+      // Нормальная работа
+      break;
   }
-
-  myStepper.tick();
-
-  client.loop(); 
+  
+  if (stepper.getCurrent() != currentState && millis() - lastSend > 5000) {
+    lastSend = millis();
+    currentPos = stepper.getCurrent();
+    client.publish("/home/curtains/procOpen", String(currentPos).c_str(), false);
+  }
+  
+  delay(1);
 }
