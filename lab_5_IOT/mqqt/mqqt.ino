@@ -1,5 +1,6 @@
 #include <GyverStepper.h>
 #include "myMQQT.h"
+#include "foFun.h"
 
 const int stepsPerRevolution = 2048;
 #define IN1 D5
@@ -25,6 +26,11 @@ long currentPos, lastSend;
 unsigned long lastPressBTN = 0;
 unsigned long calibrationStartTime = 0;
 
+// foFUN
+#define ZUMMER_PIN D0
+#define LED_PIN D6
+bool foFunOn = false;
+
 void wifiConfig() {
   wifiConnect();
   if (!client.connected()) {
@@ -33,7 +39,7 @@ void wifiConfig() {
 }
 
 bool getBtnPress() {
-  if ((digitalRead(BTN_PIN) == HIGH) && (millis() - lastPressBTN > 1000)) {
+  if ((digitalRead(BTN_PIN) == LOW) && (millis() - lastPressBTN > 1000)) {
     lastPressBTN = millis();
     return true;
   }  
@@ -133,11 +139,15 @@ void callback(char* topic, byte* payload, unsigned int length) {
   else if (String(topic) == (motor_topic + "/сolibration")) {
     startSetOpenPos();
   }
+  else if (String(topic) == (motor_topic + "/foFun")) {
+    if (data_pay == "1") foFunOn = true;
+    else foFunOn = false;
+  }
 }
 
 void setup() {
   Serial.begin(115200);
-  pinMode(BTN_PIN, INPUT); 
+  pinMode(BTN_PIN, INPUT_PULLUP); 
 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback); 
@@ -150,6 +160,11 @@ void setup() {
   stepper.setRunMode(FOLLOW_POS);
   stepper.setMaxSpeed(motorSpeed);
   stepper.setAcceleration(600);
+
+  if (foFun) {
+    pinMode(ZUMMER_PIN, OUTPUT);
+    pinMode(LED_PIN, OUTPUT);
+  }
   
   // Первоначальная калибровка
   startSetOpenPos();
@@ -159,7 +174,12 @@ void loop() {
   wifiConnect();
   client.loop();
   
-  stepper.tick();
+  if (stepper.tick() && foFunOn) {
+    foFun(ZUMMER_PIN, LED_PIN);
+  }
+  else {
+    foFunOff(ZUMMER_PIN, LED_PIN);
+  }
 
   switch (currentState) {
     case STATE_SET_OPEN_POS:
