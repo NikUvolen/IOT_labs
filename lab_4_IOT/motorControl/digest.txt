@@ -1,0 +1,229 @@
+Directory structure:
+└── motorControl/
+    ├── builder.h
+    ├── motorControl.ino
+    └── motorFuncs.h
+
+================================================
+FILE: builder.h
+================================================
+#include <GyverDBFile.h>
+#include <LittleFS.h>
+#include <SettingsGyver.h>
+
+#include "motorFuncs.h"
+
+GyverDBFile db(&LittleFS, "/data.db");
+SettingsGyver sett("myDB", &db); 
+
+void build(sets::Builder& b) {
+  if (b.beginGroup("DoorControl")) {
+    // Кнопки должны быть доступны всегда, кроме случаев когда двигатель уже движется
+    if (b.Button("Open")) {
+      if (motorState == MOTOR_STOPPED || motorState == MOTOR_CLOSED || motorState == MOTOR_CLOSING) {
+        commandOpen = true;
+        commandClose = false;  // Сбрасываем противоположную команду
+      }
+    }
+    if (b.Button("Close")) {
+      if (motorState == MOTOR_STOPPED || motorState == MOTOR_OPEN || motorState == MOTOR_OPENING) {
+        commandClose = true;
+        commandOpen = false;   // Сбрасываем противоположную команду
+      }
+    }
+    // Кнопка Stop для принудительной остановки
+    if (b.Button("Stop")) {
+      commandOpen = false;
+      commandClose = false;
+      motorState = MOTOR_STOPPED;
+    }
+    
+    b.Slider(systemVars::speed, "Speed", 0, 255);
+    
+    const char* motorStateStr = "";
+    switch (motorState) {
+      case MOTOR_OPEN:
+        motorStateStr = "Open";
+        break;
+      case MOTOR_CLOSED:
+        motorStateStr = "Closed";
+        break;
+      case MOTOR_OPENING:
+        motorStateStr = "Opening";
+        break;
+      case MOTOR_CLOSING:
+        motorStateStr = "Closing";
+        break;
+      case MOTOR_STOPPED:
+        motorStateStr = "Stopped";
+        break;
+      default:
+        motorStateStr = "Unknown";
+        break;
+    }
+    b.Label(0, "State", motorStateStr);
+    b.endGroup();
+  }
+}
+
+void update(sets::Updater& upd) {
+  upd.update(systemVars::speed, motorSpeed);
+}
+
+
+================================================
+FILE: motorControl.ino
+================================================
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+
+#include "builder.h"
+
+#define cmdOpenPin D5
+#define cmdClosePin D6
+#define STOP_TIMEOUT 5000  // Таймаут для автоматической остановки (5 секунд)
+
+unsigned long motorStartTime = 0;
+bool manualStop = false;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(MOTOR_PIN1, OUTPUT);
+  pinMode(MOTOR_PIN2, OUTPUT);
+  pinMode(cmdOpenPin, INPUT_PULLUP);
+  pinMode(cmdClosePin, INPUT_PULLUP);
+
+  LittleFS.begin();
+  db.begin();
+  db.init(systemVars::speed, 255);
+  motorSpeed = db.get(systemVars::speed).toInt();
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("myESP", "qwerty0000");
+
+  Serial.print("\nip: ");
+  Serial.println(WiFi.softAPIP());
+
+  sett.begin();
+  sett.onBuild(build);
+  sett.onUpdate(update);
+}
+
+void loop() {
+  sett.tick();
+  motorSpeed = db.get(systemVars::speed).toInt();
+
+  // Отладочная информация
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 1000) {
+    Serial.print("State: ");
+    Serial.print(motorState);
+    Serial.print(" | CmdOpen: ");
+    Serial.print(commandOpen ? "ON" : "OFF");
+    Serial.print(" | CmdClose: ");
+    Serial.println(commandClose ? "ON" : "OFF");
+    lastPrint = millis();
+  }
+
+  // Обработка команд открытия
+  if (commandOpen) {
+    if (digitalRead(cmdOpenPin) == LOW) {
+      // Достигнут конечный выключатель открытия
+      stop();
+      motorState = MOTOR_OPEN;
+      commandOpen = false;
+      motorStartTime = 0;
+    } else {
+      // Двигаемся к открытию
+      open();
+      motorState = MOTOR_OPENING;
+      if (motorStartTime == 0) {
+        motorStartTime = millis();
+      }
+      
+      // Проверка таймаута (безопасная остановка)
+      if (millis() - motorStartTime > STOP_TIMEOUT) {
+        stop();
+        motorState = MOTOR_STOPPED;
+        commandOpen = false;
+        motorStartTime = 0;
+        Serial.println("Timeout - stopped opening!");
+      }
+    }
+  } 
+  // Обработка команд закрытия
+  else if (commandClose) {
+    if (digitalRead(cmdClosePin) == LOW) {
+      // Достигнут конечный выключатель закрытия
+      stop();
+      motorState = MOTOR_CLOSED;
+      commandClose = false;
+      motorStartTime = 0;
+    } else {
+      // Двигаемся к закрытию
+      close();
+      motorState = MOTOR_CLOSING;
+      if (motorStartTime == 0) {
+        motorStartTime = millis();
+      }
+      
+      // Проверка таймаута (безопасная остановка)
+      if (millis() - motorStartTime > STOP_TIMEOUT) {
+        stop();
+        motorState = MOTOR_STOPPED;
+        commandClose = false;
+        motorStartTime = 0;
+        Serial.println("Timeout - stopped closing!");
+      }
+    }
+  } 
+  // Нет активных команд
+  else {
+    if (motorState == MOTOR_OPENING || motorState == MOTOR_CLOSING) {
+      stop();
+      motorState = MOTOR_STOPPED;
+      motorStartTime = 0;
+    }
+  }
+}
+
+
+================================================
+FILE: motorFuncs.h
+================================================
+#define MOTOR_PIN1 D0
+#define MOTOR_PIN2 D1   
+
+enum MotorState {
+  MOTOR_STOPPED,
+  MOTOR_OPENING,
+  MOTOR_CLOSING,
+  MOTOR_OPEN,
+  MOTOR_CLOSED
+};
+
+enum systemVars : size_t {   
+  open_cmd,
+  close_cmd,
+  speed,
+};
+
+bool commandOpen = false, commandClose = false;
+MotorState motorState = MOTOR_STOPPED;
+int motorSpeed = 255;
+
+void stop() {
+  analogWrite(MOTOR_PIN1, 0);
+  analogWrite(MOTOR_PIN2, 0);
+}
+
+void open() {
+  analogWrite(MOTOR_PIN1, motorSpeed);
+  analogWrite(MOTOR_PIN2, 0);
+}
+
+void close() {
+  analogWrite(MOTOR_PIN1, 0);
+  analogWrite(MOTOR_PIN2, motorSpeed);
+}
+
