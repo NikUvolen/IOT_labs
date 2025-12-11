@@ -1,6 +1,5 @@
 #include <GyverStepper.h>
 #include "myMQQT.h"
-#include "foFun.h"
 
 const int stepsPerRevolution = 2048;
 #define IN1 D5
@@ -25,11 +24,6 @@ long closeCoords = 0;
 long currentPos, lastSend;
 unsigned long lastPressBTN = 0;
 unsigned long calibrationStartTime = 0;
-
-// foFUN
-#define ZUMMER_PIN D0
-#define LED_PIN D6
-bool foFunOn = false;
 
 void wifiConfig() {
   wifiConnect();
@@ -56,6 +50,7 @@ void goTo(float proc) {
   if (closeCoords == 0) return;
   long goToCoord = floor(closeCoords * proc);
   stepper.setTarget(goToCoord);
+
 }
 
 void startSetOpenPos() {
@@ -109,6 +104,7 @@ void processSetCloseCoords() {
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.println("test");
   String data_pay;
   for (int i = 0; i < length; i++) {
     data_pay += String((char)payload[i]);
@@ -122,8 +118,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.printf("speed: %s\n", data_pay);
     changeMotorSpeed(data_pay.toInt());
   }
-  else if (String(topic) == (motor_topic + "/direction")) {
-    Serial.printf("Direction: %s\n", data_pay);
+  else if (String(topic) == (motor_topic + "/preset")) {
+    Serial.printf("preset: %s\n", data_pay);
     if (data_pay == "1") goTo(0.0);
     else if (data_pay == "2") goTo(0.25);
     else if (data_pay == "3") goTo(0.5);
@@ -139,10 +135,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
   else if (String(topic) == (motor_topic + "/сolibration")) {
     startSetOpenPos();
   }
-  else if (String(topic) == (motor_topic + "/foFun")) {
-    if (data_pay == "1") foFunOn = true;
-    else foFunOn = false;
-  }
 }
 
 void setup() {
@@ -150,21 +142,16 @@ void setup() {
   pinMode(BTN_PIN, INPUT_PULLUP); 
 
   client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(callback); 
-
   WiFi.mode(WIFI_STA);
   wifiConfig();
+  client.setCallback(callback); 
 
   lastSend = millis();
 
   stepper.setRunMode(FOLLOW_POS);
   stepper.setMaxSpeed(motorSpeed);
   stepper.setAcceleration(600);
-
-  if (foFun) {
-    pinMode(ZUMMER_PIN, OUTPUT);
-    pinMode(LED_PIN, OUTPUT);
-  }
+  stepper.autoPower(true);
   
   // Первоначальная калибровка
   startSetOpenPos();
@@ -173,13 +160,9 @@ void setup() {
 void loop() {
   wifiConnect();
   client.loop();
-  
-  if (stepper.tick() && foFunOn) {
-    foFun(ZUMMER_PIN, LED_PIN);
-  }
-  else {
-    foFunOff(ZUMMER_PIN, LED_PIN);
-  }
+  // step.enable(0);
+
+  stepper.tick();
 
   switch (currentState) {
     case STATE_SET_OPEN_POS:
@@ -196,7 +179,9 @@ void loop() {
   if (stepper.getCurrent() != currentState && millis() - lastSend > 5000) {
     lastSend = millis();
     currentPos = stepper.getCurrent();
-    client.publish("/home/curtains/procOpen", String(currentPos).c_str(), false);
+    float procOpen_result = currentPos / (float)closeCoords * 100;
+    Serial.println(procOpen_result);
+    client.publish("/home/curtains/procOpen", String(procOpen_result).c_str(), false);
   }
   
   delay(1);
