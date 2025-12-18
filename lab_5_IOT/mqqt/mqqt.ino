@@ -71,6 +71,13 @@ void goToPercent(float percent) {
   stepper.setTarget(target);
 }
 
+void moveToSteps(int steps) {
+  stepper.setRunMode(FOLLOW_POS);
+  if (isReversed) 
+    steps = -steps;
+  stepper.setTarget(steps, RELATIVE);
+}
+
 // ================== КАЛИБРОВКА =================
 void startSetOpenPos() {
   Serial.println("Calibration: set OPEN position");
@@ -177,6 +184,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
   else if (String(topic) == motor_topic + "/procOpenSlider") {
     goToPercent(data.toFloat() / 100.0);
   }
+  else if (String(topic) == motor_topic + "/moveSteps") {
+    moveToSteps(data.toInt());
+  }
   else if (String(topic) == motor_topic + "/calibration") {
     startSetOpenPos();
   }
@@ -220,8 +230,7 @@ void loop() {
 
   if (closeCoords > 0 && millis() - lastSend > 5000) {
     lastSend = millis();
-    float p = getCurrentPercent();
-    float procOpen_result = currentPos / (float)closeCoords * 100;
+    float procOpen_result = getCurrentPercent();
     client.publish("/home/curtains/procOpen", String(procOpen_result).c_str(), false);
   }
 }
