@@ -1,203 +1,236 @@
 #include <GyverStepper.h>
 #include "myMQQT.h"
-#include "foFun.h"
 
-const int stepsPerRevolution = 2048;
+// ================== НАСТРОЙКИ ==================
 #define IN1 D5
 #define IN2 D3
 #define IN3 D2
 #define IN4 D1
 #define BTN_PIN D7
 
-GStepper<STEPPER4WIRE> stepper(2048, IN1, IN3, IN2, IN4);
+const int STEPS_PER_REV = 2048;
+int motorSpeed = 700;
 
-// Состояния системы
+// ================== STEPPER ====================
+GStepper<STEPPER4WIRE> stepper(STEPS_PER_REV, IN1, IN3, IN2, IN4);
+
+// ================== СОСТОЯНИЯ ==================
 enum SystemState {
   STATE_NORMAL,
   STATE_SET_OPEN_POS,
-  STATE_SET_CLOSE_COORDS
+  STATE_SET_CLOSE_POS
 };
 
 SystemState currentState = STATE_NORMAL;
+
+// ================== ПЕРЕМЕННЫЕ =================
+bool isReversed = false;
 bool motorOn = false;
-int motorSpeed = 700;
-long closeCoords = 0;
-long currentPos, lastSend;
-unsigned long lastPressBTN = 0;
-unsigned long calibrationStartTime = 0;
 
-// foFUN
-#define ZUMMER_PIN D0
-#define LED_PIN D6
-bool foFunOn = false;
+long closeCoords = 0;       // длина хода (ВСЕГДА > 0)
+long currentPos;
+unsigned long lastBtnTime = 0;
+unsigned long calibrationTimer = 0;
+unsigned long lastSend = 0;
 
-void wifiConfig() {
-  wifiConnect();
-  if (!client.connected()) {
-    reconnect();
-  }
+// ================== УТИЛИТЫ ====================
+int dir() {
+  return isReversed ? -1 : 1;
 }
 
-bool getBtnPress() {
-  if ((digitalRead(BTN_PIN) == LOW) && (millis() - lastPressBTN > 1000)) {
-    lastPressBTN = millis();
+bool btnPressed() {
+  if (digitalRead(BTN_PIN) == LOW && millis() - lastBtnTime > 800) {
+    lastBtnTime = millis();
     return true;
-  }  
+  }
   return false;
 }
 
-void changeMotorSpeed(int speed) {
-  motorSpeed = speed;
-  stepper.setSpeed(motorSpeed);  // Установка текущей скорости
-  stepper.setMaxSpeed(motorSpeed); // Установка максимальной скорости
+// ================== WIFI =======================
+void wifiConfig() {
+  wifiConnect();
+  if (!client.connected()) reconnect();
 }
 
-void goTo(float proc) {
-  if (closeCoords == 0) return;
-  long goToCoord = floor(closeCoords * proc);
-  stepper.setTarget(goToCoord);
+void setNull() {
+  closeCoords = closeCoords - stepper.getCurrent();
+  currentPos = 0;
+  stepper.reset();
 }
 
+// ================== ДВИЖЕНИЕ ===================
+void goToPercent(float percent) {
+  if (closeCoords <= 0) return;
+
+  percent = constrain(percent, 0.0f, 1.0f);
+
+  // если реверс включен — меняем местами 0% и 100%
+  if (isReversed) percent = 1.0f - percent;
+
+  long target = lroundf(closeCoords * percent);
+  stepper.setTarget(target);
+}
+
+void moveToSteps(int steps) {
+  stepper.setRunMode(FOLLOW_POS);
+  if (isReversed) 
+    steps = -steps;
+  stepper.setTarget(steps, RELATIVE);
+}
+
+// ================== КАЛИБРОВКА =================
 void startSetOpenPos() {
-  currentState = STATE_SET_OPEN_POS;
+  Serial.println("Calibration: set OPEN position");
 
+  stepper.brake();
+  stepper.reset();               // 0 = открыто
+  stepper.setSpeed(motorSpeed * dir());
   stepper.setRunMode(KEEP_SPEED);
-  stepper.setSpeed(-motorSpeed);
-  calibrationStartTime = millis();
-  Serial.println("Start setting open position");
+
+  currentState = STATE_SET_OPEN_POS;
+  calibrationTimer = millis();
 }
 
 void processSetOpenPos() {
-  if (getBtnPress()) {
-    stepper.reset();
-    Serial.println("Open position set");
-    startSetCloseCoords();
+  if (btnPressed()) {
+    stepper.brake();
+    stepper.reset();             // жёстко фиксируем 0
+    startSetClosePos();
   }
-  
-  // freeze defend (60 sec timeout)
-  if (millis() - calibrationStartTime > 60000) {
+
+  if (millis() - calibrationTimer > 60000) {
+    Serial.println("Open calibration timeout");
+    stepper.brake();
     currentState = STATE_NORMAL;
-    stepper.brake();
-    Serial.println("Open position timeout");
   }
 }
 
-void startSetCloseCoords() {
-  currentState = STATE_SET_CLOSE_COORDS;
+void startSetClosePos() {
+  Serial.println("Calibration: set CLOSE position");
 
+  stepper.setSpeed(-motorSpeed * dir());
   stepper.setRunMode(KEEP_SPEED);
-  stepper.setSpeed(motorSpeed);
-  calibrationStartTime = millis();
-  Serial.println("Start setting close position");
+
+  currentState = STATE_SET_CLOSE_POS;
+  calibrationTimer = millis();
 }
 
-void processSetCloseCoords() {
-  if (getBtnPress()) {
+void processSetClosePos() {
+  if (btnPressed()) {
     stepper.brake();
-    closeCoords = stepper.getCurrent();
+    closeCoords = abs(stepper.getCurrent());
+
+    stepper.reset();
     stepper.setRunMode(FOLLOW_POS);
     currentState = STATE_NORMAL;
-    Serial.printf("Close position set: %d\n", closeCoords);
+
+    Serial.printf("Calibration done. Close coords = %ld\n", closeCoords);
   }
 
-  // freeze defend (60 sec timeout)
-  if (millis() - calibrationStartTime > 60000) {
-    currentState = STATE_NORMAL;
+  if (millis() - calibrationTimer > 60000) {
+    Serial.println("Close calibration timeout");
     stepper.brake();
-    Serial.println("Close position timeout");
+    currentState = STATE_NORMAL;
   }
 }
 
+// ================== РЕВЕРС =====================
+void reverseMotor(bool rev) {
+  isReversed = rev;
+  stepper.brake();
+
+  // просто переслать актуальный процент, чтобы UI обновился
+  client.publish("/home/curtains/procOpen", String(getCurrentPercent()).c_str(), false);
+}
+
+// ================== ПРОЦЕНТ ====================
+float getCurrentPercent() {
+  if (closeCoords <= 0) return 0.0f;
+
+  long pos = stepper.getCurrent();
+  pos = constrain(pos, 0L, closeCoords);
+
+  float percent = (float)pos / (float)closeCoords;   // 0..1
+
+  // если реверс включен — меняем местами 0% и 100%
+  if (isReversed) percent = 1.0f - percent;
+
+  return percent * 100.0f;
+}
+
+// ================== MQTT =======================
 void callback(char* topic, byte* payload, unsigned int length) {
-  String data_pay;
-  for (int i = 0; i < length; i++) {
-    data_pay += String((char)payload[i]);
+  String data;
+  for (uint8_t i = 0; i < length; i++) data += (char)payload[i];
+
+  if (String(topic) == motor_topic + "/setNull") {
+    setNull();
   }
-    
-  if (String(topic) == (motor_topic + "/on")) {
-    motorOn = (data_pay == "ON" || data_pay == "1") ? true : false;
-    Serial.printf("On/Off: %s\n", data_pay);
+  else if (String(topic) == motor_topic + "/reversed") {
+    reverseMotor(data.toInt() == 1);
   }
-  else if (String(topic) == (motor_topic + "/speed")) {
-    Serial.printf("speed: %s\n", data_pay);
-    changeMotorSpeed(data_pay.toInt());
+  else if (String(topic) == motor_topic + "/speed") {
+    motorSpeed = data.toInt();
+    stepper.setMaxSpeed(motorSpeed);
   }
-  else if (String(topic) == (motor_topic + "/direction")) {
-    Serial.printf("Direction: %s\n", data_pay);
-    if (data_pay == "1") goTo(0.0);
-    else if (data_pay == "2") goTo(0.25);
-    else if (data_pay == "3") goTo(0.5);
-    else if (data_pay == "4") goTo(0.75);
-    else goTo(1.0);
+  else if (String(topic) == motor_topic + "/preset") {
+    int p = data.toInt();
+    if (p == 1) goToPercent(0.0);
+    else if (p == 2) goToPercent(0.25);
+    else if (p == 3) goToPercent(0.5);
+    else if (p == 4) goToPercent(0.75);
+    else goToPercent(1.0);
   }
-  else if (String(topic) == (motor_topic + "/procOpenSlider")) {
-    Serial.printf("Direction: %s\n", data_pay);
-    float newPos = data_pay.toFloat() / 100;
-    Serial.println(newPos);
-    goTo(newPos);
+  else if (String(topic) == motor_topic + "/procOpenSlider") {
+    goToPercent(data.toFloat() / 100.0);
   }
-  else if (String(topic) == (motor_topic + "/сolibration")) {
+  else if (String(topic) == motor_topic + "/moveSteps") {
+    moveToSteps(data.toInt());
+  }
+  else if (String(topic) == motor_topic + "/calibration") {
     startSetOpenPos();
   }
-  else if (String(topic) == (motor_topic + "/foFun")) {
-    if (data_pay == "1") foFunOn = true;
-    else foFunOn = false;
-  }
 }
 
+// ================== SETUP ======================
 void setup() {
   Serial.begin(115200);
-  pinMode(BTN_PIN, INPUT_PULLUP); 
+  pinMode(BTN_PIN, INPUT_PULLUP);
 
   client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(callback); 
-
   WiFi.mode(WIFI_STA);
   wifiConfig();
-
-  lastSend = millis();
+  client.setCallback(callback);
 
   stepper.setRunMode(FOLLOW_POS);
-  stepper.setMaxSpeed(motorSpeed);
+  stepper.setMaxSpeed(motorSpeed * dir());
   stepper.setAcceleration(600);
+  stepper.autoPower(true);
 
-  if (foFun) {
-    pinMode(ZUMMER_PIN, OUTPUT);
-    pinMode(LED_PIN, OUTPUT);
-  }
-  
-  // Первоначальная калибровка
   startSetOpenPos();
 }
 
+// ================== LOOP =======================
 void loop() {
   wifiConnect();
   client.loop();
-  
-  if (stepper.tick() && foFunOn) {
-    foFun(ZUMMER_PIN, LED_PIN);
-  }
-  else {
-    foFunOff(ZUMMER_PIN, LED_PIN);
-  }
+  stepper.tick();
+  currentPos = stepper.getCurrent();
 
   switch (currentState) {
     case STATE_SET_OPEN_POS:
       processSetOpenPos();
       break;
-    case STATE_SET_CLOSE_COORDS:
-      processSetCloseCoords();
+    case STATE_SET_CLOSE_POS:
+      processSetClosePos();
       break;
     case STATE_NORMAL:
-      // Нормальная работа
       break;
   }
-  
-  if (stepper.getCurrent() != currentState && millis() - lastSend > 5000) {
+
+  if (closeCoords > 0 && millis() - lastSend > 5000) {
     lastSend = millis();
-    currentPos = stepper.getCurrent();
-    client.publish("/home/curtains/procOpen", String(currentPos).c_str(), false);
+    float procOpen_result = getCurrentPercent();
+    client.publish("/home/curtains/procOpen", String(procOpen_result).c_str(), false);
   }
-  
-  delay(1);
 }
