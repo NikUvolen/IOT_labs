@@ -29,6 +29,7 @@ void build(sets::Builder& b) {
     }
     // Кнопка Stop для принудительной остановки
     if (b.Button("Stop")) {
+      stop();
       commandOpen = false;
       commandClose = false;
       motorState = MOTOR_STOPPED;
