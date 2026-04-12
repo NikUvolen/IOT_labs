@@ -2,10 +2,10 @@
 #include "wifi.h"
 
 // config --- MQTT ----
-const char* mqtt_server = "m9.wqtt.ru";
-const int mqtt_port = 21626;
-const char* mqtt_user = "u_C2F8KR";
-const char* mqtt_password = "BHZuFL1I";
+const char* mqtt_server = "m1.wqtt.ru";
+const int mqtt_port = 20114;
+const char* mqtt_user = "u_QU4PSK";
+const char* mqtt_password = "TfEMphQO";
 
 const String motor_topic = "/home/curtains";
 
